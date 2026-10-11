@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { useSimulation } from './Simulation'
+import { PoseReadout } from './PoseReadout'
 import { Arrow, Circle, Group, Image, Layer, Line, Rect, Shape, Stage, Text } from 'react-konva'
 import type Konva from 'konva'
 import { Crosshair, Hand, MousePointer2, PenTool, RotateCcw, ScanLine, ZoomIn, ZoomOut } from 'lucide-react'
@@ -261,7 +262,9 @@ export function FieldCanvas({ points, decisions, selectedId, tool, snap, config,
       {actionKeys.map(action => <div key={action.key} className={activeWait && action.key === '5' ? 'action-key recording' : 'action-key'} style={{ '--action-color': action.color } as CSSProperties}><kbd>{action.key}</kbd><span>{action.label}</span></div>)}
     </div>
     {actionFlash && <div className="action-flash">{actionFlash}</div>}
-    <div className="coordinate-readout"><span>X {cursor.x.toFixed(1)}</span><span>Y {cursor.y.toFixed(1)}</span><small>in</small></div>
+    {tool === 'select' && selectedIndex >= 0
+      ? <PoseReadout key={selectedId} point={points[selectedIndex]} index={selectedIndex} onChange={changes => updatePoint(points[selectedIndex].id, changes)} />
+      : <div className="coordinate-readout"><span>X {cursor.x.toFixed(1)}</span><span>Y {cursor.y.toFixed(1)}</span><small>in</small></div>}
     <Stage
       ref={stageRef} width={size.width} height={size.height}
       onMouseDown={handleDown} onTouchStart={handleDown}

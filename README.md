@@ -39,6 +39,7 @@ Select a waypoint to see the purple control points of its paths. Drag them to be
 
 - 144 × 144 inch BIOBUZZ field schematic with Pedro's bottom-left origin
 - Freehand smoothing, waypoint placement, draggable nodes, heading handles, zoom and pan
+- Select a point with the Select/move tool to edit X, Y and Rotation directly in the 2D coordinate overlay. Type values or use Up/Down in a focused field (0.1 inch for position, 1° for rotation); hold Shift for 10× steps. Enter finishes editing. The inspector and Java preview update live.
 - Constant, linear, tangent and piecewise heading optimization with per-segment explanations
 - Schneider-style cubic Bézier fitting with iterative Newton reparameterization and a reverse-distance overshoot check: a 0.2-inch default error target, adjustable from 0.1 to 0.5 inches. Shared tangents retain smooth semicircles/S-curves; command markers and manual interpolation boundaries survive reduction. Fitted handles are used by both rendering and export. Freehand capture now retains finer detail before optimization.
 - Draw-time action bindings: `1` shooter, `2` intake, `3` transfer, `4` flower intake, and hold `5` for a wait rounded to 100 ms
