@@ -130,6 +130,13 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .coordinate-readout { position: absolute; z-index: 4; top: 12px; right: 12px; display: flex; align-items: baseline; gap: 12px; padding: 8px 10px; color: #eaf2f5; border: 1px solid #31505c; background: rgba(7, 22, 31, .88); border-radius: 7px; font-family: "SFMono-Regular", Consolas, monospace; font-size: 12px; font-weight: 700; }
 .coordinate-readout span { min-width: 49px; }
 .coordinate-readout small { color: var(--muted); }
+.path-action-row { margin-top:10px;padding:10px;border:1px solid var(--line);border-radius:6px;background:var(--surface);display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px; }
+.path-action-row.selected { border-color:var(--cyan); }
+.path-action-title { grid-column:1/-1;display:flex;align-items:center;gap:7px; }
+.path-action-title button { padding:0;border:0;background:transparent;cursor:pointer;font-size:11px; }.path-action-title button:last-child { margin-left:auto;color:var(--muted); }
+.path-action-title small { font-size:9px;color:var(--muted); }
+.path-action-row label { display:grid;gap:4px;min-width:0;font-size:9px;color:var(--muted); }
+.path-action-row select,.path-action-row input[type='number'] { min-width:0;height:32px;font-size:10px;padding-left:6px; }
 .coordinate-readout.pose-readout { display:grid;gap:7px;width:320px;font-weight:500; }
 .pose-readout-heading { display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:10px; }
 .pose-readout-heading > span { font-weight:700; }.pose-readout-heading small { font-size:9px; }

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { useSimulation } from './Simulation'
 import { PoseReadout } from './PoseReadout'
+import { movePathAction, nearestPathPosition, pathActionMarkers } from '../lib/pathActions'
 import { Arrow, Circle, Group, Image, Layer, Line, Rect, Shape, Stage, Text } from 'react-konva'
 import type Konva from 'konva'
 import { Crosshair, Hand, MousePointer2, PenTool, RotateCcw, ScanLine, ZoomIn, ZoomOut } from 'lucide-react'
@@ -25,6 +26,8 @@ interface Props {
   onSnapChange: (snap: boolean) => void
   onPointsChange: (points: Waypoint[]) => void
   onSelect: (id: string | null) => void
+  selectedActionId: string | null
+  onSelectAction: (pointId: string, actionId: string) => void
   onStroke: (points: Waypoint[]) => void
 }
 
@@ -46,7 +49,7 @@ const actionKeys: { key: string; type: ActionType; label: string; color: string 
 const actionMeta = Object.fromEntries(actionKeys.map(action => [action.type, action])) as Record<ActionType, typeof actionKeys[number]>
 interface PendingAction { point: Point2D; sampleIndex: number; action: PathAction }
 
-export function FieldCanvas({ points, decisions, selectedId, tool, snap, config,onConfigChange,theme,onToolChange, onSnapChange, onPointsChange, onSelect, onStroke }: Props) {
+export function FieldCanvas({ points, decisions, selectedId, tool, snap, config,onConfigChange,theme,onToolChange, onSnapChange, onPointsChange, onSelect, onStroke, selectedActionId,onSelectAction }: Props) {
   const wrapRef = useRef<HTMLDivElement>(null)
   const simulation=useSimulation(points,config,onConfigChange,theme,{selectedId,onSelect,onPointsChange})
   const supportMarker=simulation.route.supportCollision?worldToCanvas(simulation.route.supportCollision.sample):null
@@ -61,6 +64,7 @@ export function FieldCanvas({ points, decisions, selectedId, tool, snap, config,
   const [activeWait, setActiveWait] = useState(false)
   const [actionFlash, setActionFlash] = useState<string | null>(null)
   const [fieldImage, setFieldImage] = useState<HTMLImageElement | null>(null)
+  const [draggedAction, setDraggedAction] = useState<{id:string;lift:number} | null>(null)
   const strokeRef = useRef<Point2D[]>([])
   const drawingRef = useRef(false)
   const pendingActionsRef = useRef<PendingAction[]>([])
@@ -194,27 +198,33 @@ export function FieldCanvas({ points, decisions, selectedId, tool, snap, config,
     const endpoint=pointerInField(),last=strokeRef.current.at(-1)
     const rawStroke = endpoint && last && Math.hypot(endpoint.x-last.x,endpoint.y-last.y)>.5 ? [...strokeRef.current,endpoint] : strokeRef.current
     const actions = pendingActionsRef.current.sort((a, b) => a.sampleIndex - b.sampleIndex)
-    const sampled: { point: Point2D; action?: PathAction }[] = []
+    const sampled: { point: Point2D; actions?: PathAction[] }[] = []
     let startIndex = 0
     for (const marker of actions) {
       const endIndex = clamp(marker.sampleIndex, startIndex, rawStroke.length - 1)
       const section = simplify(rawStroke.slice(startIndex, endIndex + 1), 1)
       sampled.push(...section.slice(sampled.length ? 1 : 0).map(point => ({ point })))
-      if (sampled.length) sampled[sampled.length - 1].action = marker.action
+      if (sampled.length) sampled[sampled.length - 1].actions = [...(sampled[sampled.length - 1].actions ?? []), marker.action]
       startIndex = endIndex
     }
     const tail = simplify(rawStroke.slice(startIndex), 1)
     sampled.push(...tail.slice(sampled.length ? 1 : 0).map(point => ({ point })))
     const worldSamples = sampled.map(sample => ({ ...sample, point: canvasToWorld(sample.point, snap) }))
     if (worldSamples.length >= 2) {
-      const next = worldSamples.map((sample, index) => ({
+      const next: Waypoint[] = worldSamples.map((sample, index) => ({
         ...sample.point,
-        action: sample.action,
+        action: sample.actions?.[0],
         id: crypto.randomUUID(),
         heading: index===worldSamples.length-1 ? tangentDegrees(worldSamples[index-1].point,sample.point) : tangentDegrees(sample.point,worldSamples[index+1].point),
         interpolation: 'auto' as const,
         controlWeight: 1,
       }))
+      worldSamples.forEach((sample, index) => {
+        const extra=sample.actions?.slice(1)??[]
+        if(!extra.length)return
+        const owner=index===next.length-1?index-1:index
+        next[owner].pathActions=[...(next[owner].pathActions??[]),...extra.map(action=>({id:crypto.randomUUID(),position:index===next.length-1?1:0,action}))]
+      })
       onStroke(next)
     }
     setStroke([])
@@ -235,6 +245,7 @@ export function FieldCanvas({ points, decisions, selectedId, tool, snap, config,
     return { index, point, next, pts, canvas: pts.map(worldToCanvas), mid: worldToCanvas(bezierAt(pts, .5)) }
   }), [points])
   const selectedIndex = points.findIndex(point => point.id === selectedId)
+  const actionMarkers = pathActionMarkers(points)
   const editableSegments = selectedIndex < 0 ? [] : [selectedIndex - 1, selectedIndex].filter(i => i >= 0 && i < points.length - 1)
   const traceSegment = (ctx: Konva.Context, canvas: Point2D[]) => {
     ctx.beginPath(); ctx.moveTo(canvas[0].x, canvas[0].y)
@@ -364,6 +375,27 @@ export function FieldCanvas({ points, decisions, selectedId, tool, snap, config,
               <Circle radius={11} fill="#07161f" stroke={action.color} strokeWidth={2.5} />
               <Text text={action.key} x={-8} y={-6} width={16} align="center" fill={action.color} fontSize={10} fontStyle="bold" />
             </Group>}
+          </Group>
+        })}
+        {actionMarkers.map((marker,index) => {
+          const canvas=worldToCanvas(marker.point),meta=actionMeta[marker.action.type]
+          const nearby=actionMarkers.slice(0,index).filter(other=>Math.hypot(other.point.x-marker.point.x,other.point.y-marker.point.y)*5<24).length
+          const lift=draggedAction?.id===marker.id?draggedAction.lift:25+nearby*28,selected=marker.id===selectedActionId
+          return <Group key={marker.id} x={canvas.x} y={canvas.y-lift} draggable={tool==='select'}
+            onClick={()=>onSelectAction(points[marker.segment].id,marker.id)} onTap={()=>onSelectAction(points[marker.segment].id,marker.id)}
+            onDragStart={()=>{setDraggedAction({id:marker.id,lift});onSelectAction(points[marker.segment].id,marker.id)}}
+            onDragEnd={()=>setDraggedAction(null)}
+            onDragMove={event=>{
+              const world=canvasToWorld({x:event.target.x(),y:event.target.y()+lift})
+              const target=nearestPathPosition(points,world)
+              onPointsChange(movePathAction(points,marker.id,target.segment,target.position))
+              onSelectAction(points[target.segment].id,marker.id)
+            }}>
+            <Line points={[0,lift,0,0]} stroke={meta.color} strokeWidth={1.5} listening={false}/>
+            <Circle y={lift} radius={4} fill={meta.color} listening={false}/>
+            <Circle radius={selected?15:13} fill="#07161f" stroke={selected?'#ffffff':meta.color} strokeWidth={selected?3:2}/>
+            <Text text={meta.key} x={-10} y={-7} width={20} align="center" fill={meta.color} fontSize={13} fontStyle="bold" listening={false}/>
+            <Text text={marker.action.composition==='sequential'||!marker.action.composition?'S':marker.action.composition==='parallel'?'P':'D'} x={8} y={7} fontSize={9} fill="white" listening={false}/>
           </Group>
         })}
         {simulation.overlay}

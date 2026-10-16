@@ -96,7 +96,7 @@ function fit(samples: Point2D[], first: number, last: number, left: Point2D, rig
 
 export function optimizeCurves(points: Waypoint[], tolerance=.2): Waypoint[] {
   if(points.length<3) return points
-  const boundaries=[0,...points.flatMap((p,i)=>i>0 && (p.action || p.interpolation!=='auto') ? [i]:[])]
+  const boundaries=[0,...points.flatMap((p,i)=>i>0 && (p.action || p.interpolation!=='auto' || p.pathActions?.length || points[i-1]?.pathActions?.length) ? [i]:[])]
   if(boundaries.at(-1)!==points.length-1) boundaries.push(points.length-1)
   const result: Waypoint[]=[]
   for(let b=1;b<boundaries.length;b++) {

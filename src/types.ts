@@ -10,7 +10,11 @@ export interface PathAction {
   durationMs?: number
   composition?: 'sequential' | 'parallel' | 'deadline'
   timeoutMs?: number
+  // Internal: a path marker's explicit composition takes precedence over presets.
+  anchored?: boolean
 }
+
+export interface PathActionMarker { id: string; position: number; action: PathAction }
 
 export interface Waypoint extends Point2D {
   id: string
@@ -19,6 +23,9 @@ export interface Waypoint extends Point2D {
   controlWeight: number
   headingLocked?:boolean
   action?: PathAction
+  pathActions?: PathActionMarker[]
+  // Internal commands at a shared, materialized path position.
+  actionQueue?: PathAction[]
   curve?: { endId: string; c1: Point2D; c2: Point2D }
   // Pedro-visualizer control points for the path leaving this waypoint.
   // [] is a straight line; when present it overrides `curve` and auto handles.

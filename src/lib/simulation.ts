@@ -1,11 +1,12 @@
-import type { Point2D, Waypoint } from '../types'
+import type { PathAction, Point2D, Waypoint } from '../types'
 import { bezierAt, clamp, distance, segmentPoints, shortestAngle, tangentDegrees } from './geometry'
 import { curveArc } from './curveFit'
 import { analyzePath } from './optimizer'
 import { addCellPiece, advanceHive, cellOpening, createHive, GRAVITY, HIVE, hiveToLocal, pieceMass, pieceRadius } from './hivePhysics'
 import type { Hive } from './hivePhysics'
 import type { CellPiece } from './hivePhysics'
-import { compileRoute, nextPathEnd, routeActions } from './route'
+import { actionPlan, actionResourceConflict, compileRoute, nextPathEnd, nodeActions, routeActions } from './route'
+import { materializePathActions } from './pathActions'
 import { clearsWalls, constrainPose, sweepWalls } from './walls'
 import type { RobotPose } from './walls'
 import { bounceOffSupports, constrainSupports, robotSupportCollision, sweepSupports } from './supportCollisions'
@@ -23,8 +24,11 @@ export const defaultConfig: RobotConfig={rpm:312,wheel:3.78,gearing:1,mass:12,fo
 export interface RouteSample extends Point2D {heading:number; s:number; time:number; node?:number; segment:number}
 export function profile(points:Waypoint[],config:RobotConfig) {
   const samples:RouteSample[]=[]
-  const decisions=analyzePath(points)
+  const expanded=materializePathActions(points,analyzePath(points))
+  points=expanded.points
+  const decisions=expanded.decisions
   const actions=routeActions(points,config.shootWhileMoving)
+  const actionConflicts=points.flatMap((p,node)=>{const message=actionResourceConflict(actionPlan(p,node,points.length,config.shootWhileMoving).concurrent);return message?[{node,message}]:[]})
   for(let i=0;i<points.length-1;i++) {
     const pts=segmentPoints(points,i)
     const arc=curveArc(...pts),joinT=arc.parameterAt(.68)
@@ -41,13 +45,13 @@ export function profile(points:Waypoint[],config:RobotConfig) {
         heading=progress<.68 ? tangent : joinHeading+shortestAngle(joinHeading,points[i+1].heading)*(progress-.68)/.32
       }
       const prev=samples.at(-1)
-      samples.push({...p,heading,segment:i,s:(prev?.s??0)+(prev?distance(prev,p):0),time:0,...(j===80?{node:i+1}:i===0&&j===0?{node:0}:{})})
+      samples.push({...p,heading,segment:expanded.segments[i],s:(prev?.s??0)+(prev?distance(prev,p):0),time:0,...(j===80?{node:i+1}:i===0&&j===0?{node:0}:{})})
     }
   }
   const maxSpeed=config.rpm/config.gearing*Math.PI*config.wheel/60*config.efficiency
   const acceleration=Math.min(config.force/config.mass,config.grip*9.81)*39.3701
   const speeds=samples.map((sample,i)=>{
-    if(i===0 || i===samples.length-1 || sample.node!==undefined && actions[sample.node] && (!actions[sample.node]!.composition||actions[sample.node]!.composition==='sequential')) return 0
+    if(i===0 || i===samples.length-1 || sample.node!==undefined && actionPlan(points[sample.node],sample.node,points.length,config.shootWhileMoving).sequential.length) return 0
     const prev=samples[i-1],next=samples[i+1],ds=distance(prev,next)
     const bend=Math.abs(shortestAngle(tangentDegrees(prev,sample),tangentDegrees(sample,next)))*Math.PI/180
     const lateral=Math.sqrt(acceleration*Math.max(ds/2,.01)/Math.max(bend,.0001))
@@ -62,15 +66,17 @@ export function profile(points:Waypoint[],config:RobotConfig) {
   let min=0,max=0
   for(const step of compileRoute(points,config.shootWhileMoving)) {
     if(step.kind==='path'){const time=nodeTime(step.endIndex)-nodeTime(step.startIndex);min+=time;max+=time;continue}
-    const action=step.action
-    const fixed=action.type==='wait'?(action.durationMs??100)/1000:action.type==='transfer'?config.transferTime:action.type==='flowerIntake'?1:0
-    const upper=action.type==='shoot'?config.capacity*Math.max(config.shotInterval,config.transferTime)+2*config.shotSpeed/GRAVITY+2.5+180/config.turretRate:action.type==='transfer'?config.capacity*config.transferTime:fixed
-    const cap=action.timeoutMs ? action.timeoutMs/1000:Infinity
-    if(step.kind==='action'){min+=Math.min(fixed,cap);max+=Math.min(upper,cap)}
+    const duration=(action:PathAction)=>{
+      const fixed=action.type==='wait'?(action.durationMs??100)/1000:action.type==='transfer'?config.transferTime:action.type==='flowerIntake'?1:0
+      const upper=action.type==='shoot'?config.capacity*Math.max(config.shotInterval,config.transferTime)+2*config.shotSpeed/GRAVITY+2.5+180/config.turretRate:action.type==='transfer'?config.capacity*config.transferTime:fixed
+      const cap=action.timeoutMs ? action.timeoutMs/1000:Infinity
+      return {min:Math.min(fixed,cap),max:Math.min(upper,cap)}
+    }
+    if(step.kind==='action'){const d=duration(step.action);min+=d.min;max+=d.max}
     else {
       const time=nodeTime(step.path.endIndex)-nodeTime(step.path.startIndex)
-      min+=step.mode==='deadline'?time:Math.max(time,Math.min(fixed,cap))
-      max+=step.mode==='deadline'?time:Math.max(time,Math.min(upper,cap))
+      const branches=[step.action,...(step.additionalActions??[])].filter(a=>a.composition!=='deadline').map(duration)
+      min+=Math.max(time,...branches.map(d=>d.min));max+=Math.max(time,...branches.map(d=>d.max))
     }
   }
   let wallCollision:RouteSample|undefined
@@ -89,11 +95,12 @@ export function profile(points:Waypoint[],config:RobotConfig) {
     }
     previous=sample
   }
-  const shotStops=points.flatMap((point,node)=>point.action?.type==='shoot'?[{node,time:nodeTime(node)}]:[])
-  return {samples,drive,min,max,maxSpeed,acceleration,wallCollision,supportCollision,shotStops,unsafeSegments:[...unsafeSegments],actions}
+  const shotStops=points.flatMap((point,node)=>nodeActions(point).some(a=>a.type==='shoot')?[{node,time:nodeTime(node)}]:[])
+  return {samples,drive,min,max,maxSpeed,acceleration,wallCollision,supportCollision,shotStops,unsafeSegments:[...unsafeSegments],actions,points,actionConflicts}
 }
 export interface Ball extends Point2D {id:number;vx:number;vy:number;z:number;vz:number;kind:'pollen'|'nectar';color?:'red'|'blue';flower?:number;released?:boolean;shot?:boolean}
 export interface SimState {x:number;y:number;heading:number;time:number;driveTime:number;index:number;inventory:number;hopper:CellPiece[];intake:boolean;balls:Ball[];hives:Hive[];action:string;remaining:number;shotClock:number;shooting:boolean;finished:boolean;warning:string;processed:number[];nextId:number;
+  tasks?:{action:PathAction;remaining:number;timeout:number;done:boolean}[]; pendingActions?:PathAction[]; pendingConcurrent?:PathAction[];
   activeType?:string; timeout:number; concurrent?:{endNode:number;mode:'parallel'|'deadline'};
   blocked:boolean;turretYaw:number;turretElevation:number;turretReady:boolean;feeder:{piece:CellPiece;remaining:number}[];
   driveVx:number;driveVy:number;travelled:number;leftWall:boolean;autoTimedOut:boolean }
@@ -132,24 +139,48 @@ export function turretSolution(s:Pick<SimState,'x'|'y'|'hives'>&Partial<Pick<Sim
 }
 export function stepSimulation(s:SimState,points:Waypoint[],config:RobotConfig,route:ReturnType<typeof profile>,dt:number) {
   if(s.finished || s.blocked)return
+  if(route.actionConflicts.length){s.blocked=true;s.intake=false;s.shooting=false;s.action='Blocked';s.warning=route.actionConflicts[0].message;return}
+  points=route.points
   dt=Math.min(dt,Math.max(0,30-s.time));s.time+=dt
   const current=route.samples[s.index]
   if(!current){s.finished=true;return}
-  const busy=()=>s.shooting||s.remaining>0||s.activeType==='transfer'&&s.feeder.length>0||s.activeType==='intake'&&s.concurrent?.mode==='deadline'
-  const endAction=()=>{if(s.activeType==='intake'&&s.concurrent?.mode==='deadline')s.intake=false;s.shooting=false;s.remaining=0;s.activeType=undefined;s.timeout=Infinity}
+  s.tasks??=[]
+  // Keep the public simulation state's direct shooting control compatible.
+  if(s.shooting&&!s.tasks.some(t=>!t.done&&t.action.type==='shoot')){
+    s.tasks.forEach(t=>{t.done=true})
+    s.tasks.push({action:{type:'shoot'},remaining:0,timeout:s.timeout,done:false})
+  }
+  const activeBusy=()=>s.tasks!.some(t=>!t.done)
+  const busy=()=>activeBusy()||!!s.pendingActions?.length||!!s.pendingConcurrent?.length
+  const finishTask=(task:NonNullable<SimState['tasks']>[number])=>{
+    task.done=true
+    if(task.action.type==='intake'&&task.action.composition==='deadline')s.intake=false
+  }
+  const sync=()=>{
+    const active=s.tasks!.filter(t=>!t.done)
+    s.shooting=active.some(t=>t.action.type==='shoot')
+    s.remaining=Math.max(0,...active.map(t=>t.remaining));s.timeout=Math.min(Infinity,...active.map(t=>t.timeout))
+    s.activeType=active[0]?.action.type
+  }
+  const endAction=()=>{s.tasks!.forEach(finishTask);s.pendingActions=[];s.pendingConcurrent=[];sync()}
   // A parallel group joins both branches. A deadline cancels its action branch.
   if(s.concurrent && current.node===s.concurrent.endNode) {
-    if(s.concurrent.mode==='deadline')endAction()
+    s.tasks.filter(t=>t.action.composition==='deadline').forEach(finishTask)
     if(!busy())s.concurrent=undefined
   }
   if(!s.concurrent && !busy() && current.node!==undefined && !s.processed.includes(current.node)) {
     s.processed.push(current.node)
-    const action=route.actions[current.node]
-    if(action){s.action=action.type;s.activeType=action.type;s.timeout=action.timeoutMs && action.type!=='intake'&&action.type!=='wait'?action.timeoutMs/1000:Infinity
-      s.remaining=action.type==='wait'?(action.durationMs??100)/1000:action.type==='transfer'?config.transferTime:action.type==='flowerIntake'?1:0
-      if(action.composition && action.composition!=='sequential' && current.node<points.length-1)s.concurrent={mode:action.composition,endNode:nextPathEnd(points,current.node)}
+    const plan=actionPlan(points[current.node],current.node,points.length,config.shootWhileMoving)
+    s.pendingActions=plan.sequential;s.pendingConcurrent=plan.concurrent
+  }
+  const startAction=(original:PathAction,concurrent:boolean)=>{
+      const action={...original,composition:concurrent?original.composition:'sequential' as const}
+      const task={action,remaining:action.type==='wait'?(action.durationMs??100)/1000:action.type==='transfer'?config.transferTime:action.type==='flowerIntake'?1:0,
+        timeout:action.timeoutMs&&action.type!=='intake'&&action.type!=='wait'?action.timeoutMs/1000:Infinity,done:false}
+      s.tasks!.push(task);s.action=action.type
       if(action.type==='intake')s.intake=true
-      if(action.type==='shoot'){s.shooting=true;s.remaining=0;s.shotClock=0;s.intake=false}
+      if(action.type==='intake'&&action.composition!=='deadline')task.done=true
+      if(action.type==='shoot'){s.shotClock=0;s.intake=false}
       if(action.type==='flowerIntake') {
         s.intake=true
         // Pollen drops from the nearest flower; the intake stays latched (like
@@ -159,10 +190,16 @@ export function stepSimulation(s:SimState,points:Waypoint[],config:RobotConfig,r
           ball.flower=undefined;const h=s.heading*Math.PI/180;ball.vx=-Math.cos(h)*6;ball.vy=-Math.sin(h)*6
         }
       }
-    }
   }
-  s.timeout-=dt
-  if(s.timeout<=0)endAction()
+  while(!activeBusy()&&s.pendingActions?.length)startAction(s.pendingActions.shift()!,false)
+  if(!activeBusy()&&!s.pendingActions?.length&&s.pendingConcurrent?.length&&current.node!==undefined){
+    const actions=s.pendingConcurrent;s.pendingConcurrent=[]
+    s.concurrent={mode:actions.some(a=>a.composition==='parallel')?'parallel':'deadline',endNode:nextPathEnd(points,current.node)}
+    for(const action of actions)startAction(action,true)
+    if(actions.some(a=>a.type==='intake'||a.type==='flowerIntake'))s.intake=true
+  }
+  for(const task of s.tasks)if(!task.done){task.timeout-=dt;if(task.timeout<=0)finishTask(task)}
+  sync()
   // A two-stage roller handoff feeds a sensor-indexed queue, one piece at a time.
   if(s.feeder.length){s.feeder[0].remaining-=dt;if(s.feeder[0].remaining<=0)s.hopper.push(s.feeder.shift()!.piece)}
   const aim=turretSolution(s,config),yawError=shortestAngle(s.turretYaw,aim.yaw),pitchError=aim.elevation-s.turretElevation
@@ -177,21 +214,26 @@ export function stepSimulation(s:SimState,points:Waypoint[],config:RobotConfig,r
       s.balls.push({...piece,id:s.nextId++,shot:true,x:s.x+Math.cos(angle)*length*Math.cos(elevation),y:s.y+Math.sin(angle)*length*Math.cos(elevation),z:18+length*Math.sin(elevation),vx:Math.cos(angle)*config.shotSpeed*Math.cos(elevation)+(config.shootWhileMoving?s.driveVx:0),vy:Math.sin(angle)*config.shotSpeed*Math.cos(elevation)+(config.shootWhileMoving?s.driveVy:0),vz:config.shotSpeed*Math.sin(elevation)})
       s.inventory=s.hopper.length+s.feeder.length;s.shotClock=config.shotInterval
     }
-    if(s.inventory===0 && !s.balls.some(b=>b.z>pieceRadius(b.kind)+.2 && b.flower===undefined) && !s.hives.some(h=>h.tipping||h.spilling!==null))endAction()
-  } else if(s.remaining>0)s.remaining=Math.max(0,s.remaining-dt)
-  if(!busy())endAction()
+    if(s.inventory===0 && !s.balls.some(b=>b.z>pieceRadius(b.kind)+.2 && b.flower===undefined) && !s.hives.some(h=>h.tipping||h.spilling!==null))s.tasks.filter(t=>t.action.type==='shoot').forEach(finishTask)
+  }
+  for(const task of s.tasks)if(!task.done&&task.action.type!=='shoot'){
+    task.remaining=Math.max(0,task.remaining-dt)
+    if(task.remaining===0&&!(task.action.type==='transfer'&&s.feeder.length)&&!(task.action.type==='intake'&&task.action.composition==='deadline'))finishTask(task)
+  }
+  sync()
   const groupAtEnd=s.concurrent && current.node===s.concurrent.endNode
-  if(!busy() || s.concurrent && !groupAtEnd) {
+  const markerPending=current.node!==undefined&&nodeActions(points[current.node]).length>0&&!s.processed.includes(current.node)
+  if(!markerPending&&(!busy() || s.concurrent && !groupAtEnd)) {
     s.action=busy()?`${s.activeType} + Drive`:'Drive'
     const old={x:s.x,y:s.y,heading:s.heading},oldTime=s.driveTime,oldIndex=s.index
     s.driveTime+=dt
     while(s.index<route.samples.length-1 && route.samples[s.index+1].time<=s.driveTime){
       s.index++
       const next=route.samples[s.index]
-      if(next.node!==undefined && (points[next.node].action && !s.processed.includes(next.node) || s.concurrent?.endNode===next.node)){s.driveTime=next.time;break}
+      if(next.node!==undefined && (nodeActions(points[next.node]).length && !s.processed.includes(next.node) || s.concurrent?.endNode===next.node)){s.driveTime=next.time;break}
     }
     const a=route.samples[s.index],b=route.samples[s.index+1]??a
-    const atAction=a.node!==undefined && points[a.node].action && !s.processed.includes(a.node)
+    const atAction=a.node!==undefined && nodeActions(points[a.node]).length && !s.processed.includes(a.node)
     const t=atAction?0:clamp((s.driveTime-a.time)/Math.max(.00001,b.time-a.time),0,1)
     const target={x:a.x+(b.x-a.x)*t,y:a.y+(b.y-a.y)*t,heading:a.heading+shortestAngle(a.heading,b.heading)*t}
     let previous=old,previousTime=oldTime
@@ -208,7 +250,7 @@ export function stepSimulation(s:SimState,points:Waypoint[],config:RobotConfig,r
     s.driveVx=(s.x-old.x)/dt;s.driveVy=(s.y-old.y)/dt;s.travelled+=distance(old,s)
     if(s.travelled>.05&&clearsWalls(s,config.size+.02))s.leftWall=true
     s.turretYaw+=shortestAngle(old.heading,s.heading) // chassis motion carries the turret; motor counter-tracks next tick
-    if(s.index===route.samples.length-1 && !busy() && !s.concurrent && !(a.node!==undefined && points[a.node].action && !s.processed.includes(a.node)) && !s.balls.some(ball=>ball.flower===undefined && ball.z>pieceRadius(ball.kind)+.2) && !s.hives.some(h=>h.tipping || h.spilling!==null)){s.finished=true;s.intake=false}
+    if(s.index===route.samples.length-1 && !busy() && !s.concurrent && !(a.node!==undefined && nodeActions(points[a.node]).length && !s.processed.includes(a.node)) && !s.balls.some(ball=>ball.flower===undefined && ball.z>pieceRadius(ball.kind)+.2) && !s.hives.some(h=>h.tipping || h.spilling!==null)){s.finished=true;s.intake=false}
   } else {s.driveVx=0;s.driveVy=0}
   const remove=new Set<number>()
   for(const ball of s.balls){

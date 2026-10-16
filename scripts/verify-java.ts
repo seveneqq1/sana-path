@@ -81,6 +81,15 @@ for(let variant=0;variant<3;variant++){
   points[3].action={type:'flowerIntake',composition:'deadline'}
   points[4].action={type:'wait',durationMs:700}
   points[5].action={type:'shoot',composition:'parallel'}
+  if(variant===1)points[1].pathActions=[
+    {id:'moving-shot',position:.25,action:{type:'shoot',composition:'parallel'}},
+    {id:'intake',position:.25,action:{type:'intake',composition:'parallel'}},
+    {id:'wait',position:.8,action:{type:'wait',durationMs:300,composition:'sequential'}},
+  ]
+  if(variant===1)points[2].pathActions=[
+    {id:'deadline',position:.4,action:{type:'wait',durationMs:5000,composition:'deadline'}},
+    {id:'parallel',position:.4,action:{type:'wait',durationMs:700,composition:'parallel'}},
+  ]
   const name=`SanaAuto${variant}`
   files[`${name}.java`]=generateJava(points,analyzePath(points),{...defaultConfig,shootWhileMoving:variant===1,alliance:variant===2?'blue':'red',autoAim:variant!==2,intakeMaterial:variant===2?'silicone':'gecko'}).replace('public class SanaAuto ',`public class ${name} `)
 }

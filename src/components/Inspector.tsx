@@ -1,6 +1,7 @@
 import { Gauge, Info, MapPin, Minus, Plus, RotateCw, Slash, SlidersHorizontal, Spline, Timer, Trash2, Zap } from 'lucide-react'
 import type { ActionType, Interpolation, SegmentDecision, Waypoint } from '../types'
 import { clamp } from '../lib/geometry'
+import type { ReactNode } from 'react'
 
 interface Props {
   point: Waypoint | null
@@ -17,6 +18,8 @@ interface Props {
   onRemoveControl:()=>void
   onStraighten:()=>void
   onAlignFlower:()=>void
+  pathActionsEditor?: ReactNode
+  onMoveCommandToPath: () => void
 }
 
 const interpolationOptions: { value: Interpolation; label: string }[] = [
@@ -27,7 +30,7 @@ const interpolationOptions: { value: Interpolation; label: string }[] = [
   { value: 'piecewise', label: 'Piecewise' },
 ]
 
-export function Inspector({ point, index, decision, onChange, onDelete, onSnapSafe,snapMessage,shootWhileMoving,isLast,controlCount,onAddControl,onRemoveControl,onStraighten,onAlignFlower }: Props) {
+export function Inspector({ point, index, decision, onChange, onDelete, onSnapSafe,snapMessage,shootWhileMoving,isLast,controlCount,onAddControl,onRemoveControl,onStraighten,onAlignFlower,pathActionsEditor,onMoveCommandToPath }: Props) {
   if (!point) return <div className="inspector-empty">
     <div className="empty-orbit"><MapPin size={23} /></div>
     <h3>No waypoint selected</h3>
@@ -64,6 +67,7 @@ export function Inspector({ point, index, decision, onChange, onDelete, onSnapSa
       </select>
       {point.action?.type === 'wait' && <label className="wait-input"><Timer size={14} /><input aria-label="Wait duration" type="number" min="100" step="100" value={point.action.durationMs ?? 100} onChange={event => onChange({ action: { ...point.action!, durationMs: Math.max(100, Math.round(Number(event.target.value) / 100) * 100) } })} /><span>ms</span></label>}
       {point.action && <>
+        <button className="safe-snap-button" onClick={onMoveCommandToPath}><Zap size={14}/>Make draggable path action</button>
         <label className="command-label">Ivy composition
           <select aria-label="Ivy composition" value={point.action.type==='shoot'&&shootWhileMoving?point.action.composition==='deadline'?'deadline':'parallel':point.action.composition ?? 'sequential'} onChange={event => onChange({action: {...point.action!, composition: event.target.value as 'sequential' | 'parallel' | 'deadline'}})}>
             <option value="sequential" disabled={point.action.type==='shoot'&&shootWhileMoving}>Sequential · then drive</option>
@@ -81,6 +85,7 @@ export function Inspector({ point, index, decision, onChange, onDelete, onSnapSa
       </>}
     </div>
 
+    {pathActionsEditor}
     <div className="field-group">
       <div className="group-title"><MapPin size={15} /><span>Field position</span><small>inches</small></div>
       <div className="input-grid">

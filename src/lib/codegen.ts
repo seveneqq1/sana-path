@@ -1,6 +1,7 @@
 import type { PathAction, SegmentDecision, Waypoint } from '../types'
 import { segmentPoints } from './geometry'
-import { compileRoute, routeActions } from './route'
+import { compileRoute, effectiveAction, nodeActions } from './route'
+import { materializePathActions } from './pathActions'
 import { defaultConfig, profile } from './simulation'
 import type { RobotConfig } from './simulation'
 import { cellOpening, createHive } from './hivePhysics'
@@ -20,11 +21,14 @@ function interpolation(decision: SegmentDecision, start: number, end: number, po
 
 export function generateJava(points: Waypoint[], decisions: SegmentDecision[],config:RobotConfig=defaultConfig) {
   if (points.length < 2) return '// Add at least two waypoints to generate a path.'
+  const expanded = materializePathActions(points, decisions)
+  points = expanded.points; decisions = expanded.decisions
   const route = compileRoute(points,config.shootWhileMoving)
   const paths = route.flatMap(step => step.kind === 'path' ? [step] : step.kind === 'group' ? [step.path] : [])
-  const actions = routeActions(points,config.shootWhileMoving).flatMap(action => action ? [action] : [])
+  const actions = points.flatMap((p, i) => nodeActions(p).map(a => effectiveAction(a,i,points.length,config.shootWhileMoving)))
   const used = new Set(actions.map(action => action.type))
   const safety=profile(points,config),collision=safety.wallCollision,support=safety.supportCollision
+  const actionConflict=safety.actionConflicts[0]
   const opening=cellOpening(createHive(config.alliance==='red'?1:0,config.alliance),config.alliance==='red'?1:0)
   const fields = points.map((point, index) => `    private final Pose ${poseName(index)} = p.of(${n(point.x)}, ${n(point.y)}, ${n(point.heading)});`).join('\n')
   const pathMethods = paths.map(item => {
@@ -41,25 +45,30 @@ export function generateJava(points: Waypoint[], decisions: SegmentDecision[],co
     })
     return `    private Path ${item.name}() {\n        return Paths.path(\n${segments.join(',\n')}\n        );\n    }`
   }).join('\n\n')
-  const actionCode = (action: PathAction, deadline = false) => {
+  const actionCode = (action: PathAction, deadline = false, keepIntake = false) => {
     const expression = action.type === 'wait' ? `waitMs(${milliseconds(action.durationMs)})`
       : action.type === 'intake' ? deadline ? 'intakeUntilCancelled()' : 'instant(this::startIntake).requiring(intakeResource)'
-      : `${action.type}Command()`
+      : action.type === 'shoot' && keepIntake ? 'shootCommand(true)' : `${action.type}Command()`
     return action.timeoutMs && action.type !== 'wait' && action.type !== 'intake'
       ? `race(${expression}, waitMs(${milliseconds(action.timeoutMs)}))` : expression
   }
   const commands = route.map(step => {
     if (step.kind === 'path') return `            followPath(${step.name}())`
     if (step.kind === 'action') return `            ${actionCode(step.action)}`
-    return `            ${step.mode}(followPath(${step.path.name}()), ${actionCode(step.action, step.mode === 'deadline')})`
+    const branches = [step.action, ...(step.additionalActions ?? [])]
+    const keepIntake = branches.some(a => a.type === 'intake' || a.type === 'flowerIntake')
+    const deadlines = branches.filter(a => a.composition === 'deadline')
+    const parallel = branches.filter(a => a.composition !== 'deadline')
+    const drive = deadlines.length ? `deadline(followPath(${step.path.name}()), ${deadlines.map(a=>actionCode(a,true,keepIntake)).join(', ')})` : `followPath(${step.path.name}())`
+    return `            ${parallel.length ? `parallel(${drive}, ${parallel.map(a=>actionCode(a,false,keepIntake)).join(', ')})` : drive}`
   })
   commands.push('            instant(this::stopAllSubsystems)')
   const boundedTypes = ['shoot', 'transfer', 'flowerIntake'] as const
   const commandsMethods = boundedTypes.filter(type => used.has(type)).map(type => {
     const suffix = type === 'shoot' ? 'Shooter' : type === 'transfer' ? 'Transfer' : 'FlowerIntake'
-    const startHook=type==='shoot' && used.has('intake') ? '() -> { stopIntake(); startShooter(); }' : `this::start${suffix}`
+    const startHook=type==='shoot' && used.has('intake') ? '() -> { if (!keepIntakeRunning) stopIntake(); startShooter(); }' : `this::start${suffix}`
     const command=`Command.build()\n            .setStart(${startHook})\n            .setExecute(${type==='shoot'?'() -> { updateShooter(); if (isTurretAtTarget() && isShooterAtSpeed()) advanceFeeder(); else holdFeeder(); }':`this::update${suffix}`})\n            .setDone(this::is${suffix}Finished)\n            .setEnd(reason -> stop${suffix}())\n            .requiring(${type === 'shoot' ? 'shooterResource, feedResource' : type === 'transfer' ? 'feedResource' : 'intakeResource'})`
-    return `    private Command ${type}Command() {\n        return ${type==='shoot'?`sequential(\n            aimTurretCommand(),\n            deadline(${command}, trackTurretCommand())\n        )`:command};\n    }`
+    return `${type==='shoot'?`    private Command shootCommand() { return shootCommand(false); }\n\n`:''}    private Command ${type}Command(${type==='shoot'?'boolean keepIntakeRunning':''}) {\n        return ${type==='shoot'?`sequential(\n            aimTurretCommand(),\n            deadline(${command}, trackTurretCommand())\n        )`:command};\n    }`
   })
   if(used.has('shoot'))commandsMethods.push(`    // Turret yaw is independent of every path's chassis heading.
     private Command aimTurretCommand() {
@@ -177,10 +186,12 @@ ${fields}
     private final Object turretResource = new Object();
     private final boolean routeClearsWalls = ${!collision}; // ${config.size}-inch rotated square footprint
     private final boolean routeClearsSupports = ${!support}; // conservative template height; recheck against your CAD
+${actionConflict?'    private final boolean actionsCompatible = false;\n':''}
 
     @Override
     public void init() {
         Scheduler.reset();
+${actionConflict?`        if (!actionsCompatible) throw new IllegalArgumentException("${actionConflict.message}");\n`:''}
         if (!routeClearsWalls) throw new IllegalArgumentException("${collision?`Route intersects a wall near (${n(collision.x)}, ${n(collision.y)}). Edit the route before running.`:'Recheck wall clearance after changing the robot footprint.'}");
         if (!routeClearsSupports) throw new IllegalArgumentException("${support?`Route intersects ${support.name} near (${n(support.sample.x)}, ${n(support.sample.y)}). Edit the route before running.`:'Recheck hive support clearance against your robot geometry.'}");
         follower = Constants.create(hardwareMap);

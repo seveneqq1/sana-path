@@ -165,7 +165,7 @@ export interface BuildReport { sections: number; controls: number; before: numbe
 export function autoBuild(points: Waypoint[], config: RobotConfig, closeness: Closeness = 'balanced'): { points: Waypoint[]; report: BuildReport } {
   const settings = SETTINGS[closeness], size = config.size
   if (points.length < 2) return { points, report: { sections: 0, controls: 0, before: points.length, after: points.length, clear: true, drive: 0, snapped: 0 } }
-  const majors = points.flatMap((p, i) => i === 0 || i === points.length - 1 || p.action || p.headingLocked ? [i] : [])
+  const majors = points.flatMap((p, i) => i === 0 || i === points.length - 1 || p.action || p.headingLocked || p.pathActions?.length || points[i-1]?.pathActions?.length ? [i] : [])
   let snapped = 0, clear = true
   const snap = (p: Waypoint) => { const s = snapSafe(p, size); if (distance(s, p) > 1e-6) snapped++; return { ...s, curve: undefined, controlPoints: undefined } }
   const out: Waypoint[] = [snap(points[0])]

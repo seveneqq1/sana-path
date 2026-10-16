@@ -3,6 +3,7 @@ import { Download, Hexagon, Moon, Route, RotateCcw, ShieldCheck, Sparkles, Sun, 
 import { FieldCanvas } from './components/FieldCanvas'
 import { Inspector } from './components/Inspector'
 import { CodePanel } from './components/CodePanel'
+import { PathActionsEditor } from './components/PathActionsEditor'
 import { editWaypoint, seedWaypoints } from './lib/geometry'
 import { analyzePath } from './lib/optimizer'
 import { downloadJava, generateJava } from './lib/codegen'
@@ -16,6 +17,7 @@ export default function App() {
   const [points, setPoints] = useState<Waypoint[]>(seedWaypoints)
   const [history, setHistory] = useState<Waypoint[][]>([])
   const [selectedId, setSelectedId] = useState<string | null>(points[1]?.id ?? null)
+  const [selectedActionId, setSelectedActionId] = useState<string | null>(null)
   const [tool, setTool] = useState<CanvasTool>('select')
   const [snap, setSnap] = useState(false)
   const [config,setConfig]=useState(defaultConfig)
@@ -37,6 +39,7 @@ export default function App() {
   const selectedIndex = points.findIndex(point => point.id === selectedId)
   const selectedPoint = selectedIndex >= 0 ? points[selectedIndex] : null
   const selectedDecision = selectedIndex > 0 ? decisions[selectedIndex - 1] : null
+  const selectedPathIndex = selectedIndex === points.length - 1 ? selectedIndex - 1 : selectedIndex
 
   const updatePoints = (next: Waypoint[]) => {
     setHistory(current => [...current.slice(-19), points])
@@ -102,7 +105,7 @@ export default function App() {
     <main className="workspace">
       <div className="canvas-column">
         <div className="section-bar">
-          <div><Route size={15}/>Your route <small>{Math.max(0, points.length - 1)} segments · {points.filter(point => point.action).length} commands</small></div>
+          <div><Route size={15}/>Your route <small>{Math.max(0, points.length - 1)} segments · {points.reduce((sum,point) => sum + (point.action ? 1 : 0) + (point.pathActions?.length ?? 0),0)} commands</small></div>
           <div className="section-actions">
             {unsafe && <button className="make-safe-button" onClick={fixSafety} title="Move unsafe points to the closest safe spot and bend unsafe paths clear of obstacles"><ShieldCheck size={15} />Make route safe</button>}
             <label className="auto-draw-toggle" title="Automatically clean up freehand drawings into Pedro paths"><input type="checkbox" checked={autoAfterDraw} onChange={e=>setAutoAfterDraw(e.target.checked)}/>Auto-build after drawing</label>
@@ -113,7 +116,8 @@ export default function App() {
         <FieldCanvas
           points={points} decisions={decisions} selectedId={selectedId} tool={tool} snap={snap}
           config={config} onConfigChange={setConfig} theme={theme}
-          onToolChange={setTool} onSnapChange={setSnap} onPointsChange={updatePoints} onSelect={setSelectedId}
+          onToolChange={setTool} onSnapChange={setSnap} onPointsChange={updatePoints} onSelect={id=>{setSelectedId(id);setSelectedActionId(null)}}
+          selectedActionId={selectedActionId} onSelectAction={(pointId,actionId)=>{setSelectedId(pointId);setSelectedActionId(actionId)}}
           onStroke={stroke => autoAfterDraw ? build(stroke, true) : updatePoints(stroke)}
         />
         {toast && <div className="build-toast" role="status">{toast}</div>}
@@ -124,6 +128,16 @@ export default function App() {
           <Inspector
             point={selectedPoint} index={selectedIndex} decision={selectedDecision}
             onChange={updateSelected}
+            onMoveCommandToPath={()=>{
+              if(!selectedPoint?.action||points.length<2)return
+              const segment=selectedIndex===points.length-1?selectedIndex-1:selectedIndex,id=crypto.randomUUID()
+              const marker={id,position:selectedIndex===points.length-1?1:0,action:{...selectedPoint.action,composition:selectedPoint.action.composition??'sequential' as const}}
+              updatePoints(points.map((p,i)=>({...p,...(i===selectedIndex?{action:undefined}:{}),...(i===segment?{pathActions:[...(p.pathActions??[]),marker]}:{})})))
+              setSelectedId(points[segment].id);setSelectedActionId(id)
+            }}
+            pathActionsEditor={<PathActionsEditor points={points} segment={selectedPathIndex} selectedId={selectedActionId}
+              onSelect={id=>{setSelectedId(points[selectedPathIndex].id);setSelectedActionId(id)}}
+              onChange={pathActions=>updatePoints(editWaypoint(points,points[selectedPathIndex].id,{pathActions}))} />}
             isLast={selectedIndex===points.length-1}
             controlCount={selectedIndex>=0&&selectedIndex<points.length-1?(points[selectedIndex].controlPoints?.length??null):null}
             onAddControl={()=>updatePoints(addControlPoint(points,selectedIndex))}
@@ -142,7 +156,9 @@ export default function App() {
             }}
             onDelete={() => {
               if (!selectedId) return
-              updatePoints(points.filter(point => point.id !== selectedId))
+              const remaining=points.filter(point => point.id !== selectedId)
+              if(remaining.length)remaining[remaining.length-1]={...remaining.at(-1)!,pathActions:undefined}
+              updatePoints(remaining)
               setSelectedId(null)
             }}
           />

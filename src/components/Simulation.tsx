@@ -114,6 +114,7 @@ export function useSimulation(points:Waypoint[],config:RobotConfig,setConfig:(co
       {view.warning && <strong>{view.warning}</strong>}
     </div>}
     {clearance && !view.blocked && <div className="route-safety" role="status">Unsafe path segments: {route.unsafeSegments.map(i=>i+1).join(', ')}. {clearance.name} near ({clearance.sample.x.toFixed(1)}, {clearance.sample.y.toFixed(1)}). Safe waypoints do not guarantee a safe curve. Red segments will stop the robot at contact.</div>}
+    {!!route.actionConflicts.length && <div className="route-safety" role="status">{route.actionConflicts[0].message}</div>}
     {threeD&&heading.controls}
     {enabled&&<AutoScoreboard state={view} config={config}/>}
     {settings && <div className="robot-settings">
